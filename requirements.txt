@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+litellm
+langgraph
+llama-parse
+pydantic
+python-dotenv
+python-multipart
+langchain-openai
+langchain-core
