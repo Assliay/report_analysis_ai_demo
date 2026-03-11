@@ -8,3 +8,5 @@ python-dotenv
 python-multipart
 langchain-openai
 langchain-core
+magic-pdf[full]
+PyMuPDF

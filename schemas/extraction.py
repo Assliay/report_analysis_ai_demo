@@ -3,7 +3,7 @@ from typing import List, Optional, Dict, Any, Union
 
 class Evidence(BaseModel):
     text: str = Field(..., description="The original text snippet from the report used as evidence.")
-    page_number: Optional[int] = Field(None, description="The page number where the evidence was found.")
+    page_number: Optional[Union[int, str]] = Field(None, description="The page number where the evidence was found.")
 
 class FinancialMetric(BaseModel):
     year: Union[str, int] = Field(..., description="The year for the metric (e.g., '2023E', 2024).")
