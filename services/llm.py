@@ -6,17 +6,26 @@ load_dotenv()
 
 def get_completion(prompt: str, system_prompt: str = "You are a helpful financial assistant."):
     """
-    Unified LLM completion using LiteLLM.
+    Unified LLM completion using LiteLLM with fallback logic.
     """
-    model = os.getenv("LLM_MODEL", "gpt-4-turbo")
+    primary_model = os.getenv("LLM_MODEL")
+    fallback_model = os.getenv("FALLBACK_MODEL")
+    api_base = os.getenv("OPENAI_API_BASE")
     
+    models = [primary_model]
+    if fallback_model:
+        models.append(fallback_model)
+    
+    # Use completion with fallbacks
     response = completion(
-        model=model,
+        model=primary_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
-        response_format={ "type": "json_object" } # Ensure JSON output
+        api_base=api_base,
+        fallbacks=models[1:] if len(models) > 1 else None,
+        response_format={ "type": "json_object" }
     )
     
     return response.choices[0].message.content

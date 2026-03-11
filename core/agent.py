@@ -18,11 +18,23 @@ def extraction_node(state: AgentState):
     content = state["content"]
     prompt = f"""
     Based on the following financial research report content (in Markdown), extract the required information.
-    Return a JSON object matching the ResearchReport schema.
-    Ensure every metric has an 'evidence' field with the exact quote from the text and the page number.
+    Return a JSON object exactly matching the ResearchReport schema.
+    
+    CRITICAL: 
+    - The output MUST be a valid JSON object.
+    - Fields like 'title', 'core_logic', and 'risk_warnings' are REQUIRED.
+    - Ensure every metric has an 'evidence' field with the exact quote from the text and the page number.
+    
+    SCHEMA REFERENCE:
+    - title: str
+    - publication_date: str (optional)
+    - company_name: str (optional)
+    - core_logic: str
+    - risk_warnings: str
+    - revenue_forecasts: list of {{ year, value, evidence: {{ text, page_number }} }}
     
     CONTENT:
-    {content[:15000]}  # Truncate if too long
+    {content[:15000]}
     """
     
     system_prompt = "You are a professional financial data extractor. Output ONLY valid JSON."

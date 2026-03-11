@@ -12,7 +12,7 @@ def parse_pdf(file_path: str):
         result_type="markdown",
         api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
         verbose=True,
-        language="ch"  # Support Chinese
+        language="ch_sim"  # Correct code for Simplified Chinese
     )
     
     documents = parser.load_data(file_path)
