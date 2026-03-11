@@ -35,6 +35,27 @@
 4. **接口使用**:
    - `POST /upload`: 上传 PDF 文件，返回结构化 JSON。
 
+## 测试与验证
+
+项目包含自动化测试脚本 `test_api.py`，用于验证解析引擎的端到端流程：
+
+1. **本地启动服务**:
+   ```bash
+   python main.py
+   ```
+
+2. **运行测试脚本**:
+   ```bash
+   python test_api.py
+   ```
+   该脚本会自动读取 `test_report.pdf` 并请求本地 API，输出详细的结构化 JSON 结果及证据溯源信息。
+
+## 维护记录
+- **2026-03-11**: 
+  - 优化 `.gitignore`，移除追踪产生的 `server.log`。
+  - 新增 `test_api.py` 方便快速验证解析精度。
+  - 完成 A 股 2025 策略报告的结构化提取测试，证据溯源功能验证通过。
+
 ## 如何扩展提取字段
 
 只需要修改 `schemas/extraction.py` 中的 `ResearchReport` Pydantic 模型。
