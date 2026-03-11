@@ -4,6 +4,7 @@ import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from core.agent import create_agent
 from services.parser import parse_pdf
+from services.parser_mineru import parse_pdf_mineru, parse_pdf_fallback
 from schemas.extraction import ExtractionResult
 from dotenv import load_dotenv
 
@@ -25,8 +26,17 @@ async def upload_report(file: UploadFile = File(...)):
     
     try:
         # 1. Parse PDF
-        print(f"Parsing {file.filename}...")
-        markdown_content = parse_pdf(temp_path)
+        parser_type = os.getenv("PARSER_TYPE", "llamaparse")
+        print(f"Parsing {file.filename} using {parser_type}...")
+        
+        if parser_type == "mineru":
+            try:
+                markdown_content = parse_pdf_mineru(temp_path)
+            except Exception as e:
+                print(f"MinerU failed, falling back to basic PDF text: {e}")
+                markdown_content = parse_pdf_fallback(temp_path)
+        else:
+            markdown_content = parse_pdf(temp_path)
         
         # 2. Run Agent workflow
         print(f"Running Agent Workflow...")
