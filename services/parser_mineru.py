@@ -35,7 +35,8 @@ def parse_pdf_mineru(pdf_path: str):
             "language": "ch",
             "enable_table": True,
             "is_ocr": False,
-            "enable_formula": True
+            "enable_formula": True,
+            "page_range": "1-20"  # 强制限制在前20页以适配 API 免费额度
         }
         
         resp = requests.post(f"{BASE_URL}/parse/file", headers=headers, json=data, timeout=30)
@@ -99,6 +100,7 @@ def _poll_agent_result(base_url, task_id, headers, timeout=300, interval=5):
                 markdown_url = task_data.get("markdown_url")
                 print(f"✅ [MinerU Agent] {elapsed}s 解析完成, 正在拉取 Markdown 内容...")
                 md_resp = requests.get(markdown_url, timeout=30)
+                md_resp.encoding = 'utf-8'
                 return md_resp.text
 
             if state == "failed":

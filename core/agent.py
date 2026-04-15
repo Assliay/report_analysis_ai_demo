@@ -39,7 +39,8 @@ def extraction_node(state: AgentState):
     
     CRITICAL: 
     - The output MUST be a valid JSON.
-    - Fields 'title', 'core_logic', and 'risk_warnings' are REQUIRED and MUST be strings.
+    - Fields 'title', 'target' (the company being researched), 'core_logic', and 'risk_warnings' are REQUIRED and MUST be strings.
+    - Ensure 'title' is the actual report title, and 'target' specifically extracts the name of the subject/company of the report.
     - Do NOT return arrays for 'core_logic' or 'risk_warnings'; summarize them into a single string.
     - MUST provide 'evidence' for metrics with the EXACT quote and page number.
     

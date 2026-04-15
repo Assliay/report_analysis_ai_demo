@@ -2,7 +2,7 @@ import asyncio
 import os
 import uuid
 import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from core.agent import create_agent
 from services.parser import parse_pdf
@@ -16,27 +16,19 @@ load_dotenv()
 app = FastAPI(title="Financial Report Analysis Engine")
 agent = create_agent()
 
-@app.post("/upload", response_model=ExtractionResult)
-async def upload_report(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-    
-    # 异步写入文件，避免阻塞事件循环
-    temp_id = str(uuid.uuid4())
-    temp_path = f"temp_{temp_id}.pdf"
-    
-    # 获取文件内容
-    content = await file.read()
-    await run_in_threadpool(write_file_sync, temp_path, content)
-    
+# 简单的内存任务状态存储 (生产环境建议用 Redis 或 DB)
+TASKS = {}
+
+async def process_pdf_task(task_id: str, temp_path: str, filename: str):
+    """后台处理 PDF 的异步任务"""
+    TASKS[task_id]["status"] = "processing"
     try:
         # 1. Parse PDF
         parser_type = os.getenv("PARSER_TYPE", "mineru")
-        print(f"🚀 Step 1: Parsing {file.filename} using {parser_type}...")
+        print(f"🚀 Task {task_id} Step 1: Parsing {filename} using {parser_type}...")
         
         if parser_type == "mineru":
             try:
-                # 尝试使用 MinerU v4 API (涉及大量同步 requests，交给线程池)
                 markdown_content = await run_in_threadpool(parse_pdf_mineru, temp_path)
             except Exception as e:
                 print(f"MinerU failed, falling back to basic PDF text: {e}")
@@ -45,20 +37,19 @@ async def upload_report(file: UploadFile = File(...)):
             markdown_content = await run_in_threadpool(parse_pdf, temp_path)
         
         # 2. RAG Initialization
-        print(f"✅ Step 2: Building Vector Store (Nested + RRF) for {file.filename}...")
+        print(f"✅ Task {task_id} Step 2: Building Vector Store (Nested + RRF) for {filename}...")
         vector_db = VectorService()
-        # Ingestion 涉及计算 Embedding 和网络请求，交给线程池
         await run_in_threadpool(
             vector_db.ingest_text, 
             markdown_content, 
-            {"title": file.filename, "report_id": temp_id}
+            {"title": filename, "report_id": task_id}
         )
 
         # 3. Run Agent workflow
-        print(f"✅ Step 3: Running Agent Workflow with RAG...")
+        print(f"✅ Task {task_id} Step 3: Running Agent Workflow with RAG...")
         initial_state = {
             "content": markdown_content,
-            "report_id": temp_id,
+            "report_id": task_id,
             "vector_db": vector_db,
             "extraction": {},
             "iteration": 0,
@@ -66,21 +57,78 @@ async def upload_report(file: UploadFile = File(...)):
             "is_valid": False
         }
         
-        # 触发 LangGraph 节点（底层包含 LiteLLM 调用），使用异步包装
-        final_state = await run_in_threadpool(agent.invoke, initial_state)
+        final_state = await agent.ainvoke(initial_state)
         
-        return {
+        TASKS[task_id]["status"] = "completed"
+        TASKS[task_id]["result"] = {
             "data": final_state["extraction"],
             "verification_status": "verified" if final_state["is_valid"] else "needs_review",
             "reasoning": final_state["feedback"]
         }
+        print(f"🎉 Task {task_id} Completed!")
         
     except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Task {task_id} Error: {e}")
+        TASKS[task_id]["status"] = "failed"
+        TASKS[task_id]["error"] = str(e)
     finally:
-        # 异步清理文件
+        # 清理临时文件
         await run_in_threadpool(cleanup_file_sync, temp_path)
+
+@app.post("/upload")
+async def upload_report(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """接收文件，立即返回 Task ID"""
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    
+    task_id = str(uuid.uuid4())
+    temp_path = f"temp_{task_id}.pdf"
+    
+    # 获取并写入文件
+    content = await file.read()
+    await run_in_threadpool(write_file_sync, temp_path, content)
+    
+    # 初始化任务状态
+    TASKS[task_id] = {"status": "pending", "result": None, "error": None}
+    
+    # 将处理逻辑加入 FastAPI 的后台任务队列
+    background_tasks.add_task(process_pdf_task, task_id, temp_path, file.filename)
+    
+    return {"task_id": task_id, "status": "pending", "message": "File uploaded successfully. Processing started in background."}
+
+@app.get("/status/{task_id}")
+async def get_task_status(task_id: str):
+    """根据 Task ID 轮询结果"""
+    if task_id not in TASKS:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return TASKS[task_id]
+
+@app.websocket("/ws/status/{task_id}")
+async def websocket_status(websocket: WebSocket, task_id: str):
+    """WebSocket 实时推送任务状态"""
+    await websocket.accept()
+    if task_id not in TASKS:
+        await websocket.send_json({"error": "Task not found"})
+        await websocket.close()
+        return
+
+    try:
+        last_status = None
+        while True:
+            current_status = TASKS[task_id]["status"]
+            if current_status != last_status:
+                await websocket.send_json(TASKS[task_id])
+                last_status = current_status
+            
+            if current_status in ["completed", "failed"]:
+                break
+                
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        print(f"WebSocket client disconnected for task {task_id}")
+    finally:
+        if not websocket.client_state.name == "DISCONNECTED":
+            await websocket.close()
 
 def write_file_sync(path: str, data: bytes):
     with open(path, "wb") as f:

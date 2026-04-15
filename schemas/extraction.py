@@ -16,6 +16,7 @@ class ResearchReport(BaseModel):
     institution: Optional[str] = Field(None, description="The brokerage or research institution.")
     analyst: List[str] = Field(default_factory=list, description="Names of the analysts.")
     
+    target: Optional[str] = Field(None, description="The target company or entity being researched in the report.")
     company_name: Optional[str] = Field(None, description="Name of the target company.")
     stock_code: Optional[str] = Field(None, description="Stock code of the target company.")
     rating: Optional[str] = Field(None, description="Investment rating (e.g., Buy, Hold).")

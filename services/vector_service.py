@@ -9,6 +9,18 @@ from services.llm import get_completion
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+import os
+import time
+import uuid
+import sys
+import asyncio
+import concurrent.futures
+from typing import List, Dict, Any
+from opensearchpy import OpenSearch, helpers
+from services.llm import get_completion, aget_completion
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 class VectorService:
     def __init__(self):
         self.model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -21,7 +33,7 @@ class VectorService:
         self.es_url = os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
         self.index_name = os.getenv("ES_INDEX_NAME", "financial_reports_v2")
         
-        # OpenSearch 认证处理 (Bonsai 兼容性)
+        # OpenSearch 客户端 (保持同步用于索引创建和写入，查询将逐步支持异步)
         self.client = OpenSearch(
             [self.es_url],
             http_auth=None,
@@ -134,16 +146,16 @@ class VectorService:
         print(f"✅ RAG: 成功入库研报 '{title}'")
         sys.stdout.flush()
 
-    def _generate_enhanced_queries(self, original_query: str) -> List[str]:
+    async def _agenerate_enhanced_queries(self, original_query: str) -> List[str]:
         prompt = f"""作为资深金融分析师，将以下查询扩展为 3 个专业检索词。仅输出词语，换行分隔。查询：{original_query}"""
         try:
-            res = get_completion(prompt, "Financial analyst.")
+            res = await aget_completion(prompt, "Financial analyst.")
             return [q.strip() for q in res.split("\n") if q.strip()][:3]
         except Exception:
             return []
 
-    def _single_query(self, q: str, query_vector: List[float], idx: int, top_k: int, report_id: str) -> List[str]:
-        """单路检索逻辑 (包含 429 重试机制)"""
+    async def _asingle_query(self, q: str, query_vector: List[float], idx: int, top_k: int, report_id: str) -> List[str]:
+        """异步单路检索 (使用 run_in_executor 桥接同步驱动)"""
         search_query = {
             "size": top_k,
             "query": {
@@ -157,58 +169,72 @@ class VectorService:
         }
         if report_id: search_query["query"]["bool"]["filter"] = [{"term": {"report_id": report_id}}]
         
-        results = []
+        loop = asyncio.get_event_loop()
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                response = self.client.search(index=self.index_name, body=search_query)
+                response = await loop.run_in_executor(None, lambda: self.client.search(index=self.index_name, body=search_query))
+                results = []
                 for hit in response["hits"]["hits"]:
                     if "inner_hits" in hit:
                         for inner_key in hit["inner_hits"]:
                             for inner_hit in hit["inner_hits"][inner_key]["hits"]["hits"]:
                                 src = inner_hit["_source"]
                                 results.append(f"[Page {src.get('page_num', '?')}] {src.get('content', '')}")
-                break # 成功则退出
+                return results
             except Exception as e:
                 if "429" in str(e) and attempt < max_attempts - 1:
-                    wait = (attempt + 1) * 2
-                    print(f"⚠️ RAG Search 429 hit, retrying in {wait}s...")
-                    time.sleep(wait)
+                    await asyncio.sleep((attempt + 1) * 2)
                 else:
                     print(f"❌ RAG Search Error: {e}")
                     break
-        return results
+        return []
 
-    def query(self, query_text: str, top_k: int = 5, report_id: str = None) -> str:
-        print(f"🔍 RAG: 并发检索启动...")
+    async def aquery(self, query_text: str, top_k: int = 5, report_id: str = None) -> str:
+        print(f"🚀 RAG: Asyncio concurrent retrieval started...")
         sys.stdout.flush()
         
-        all_enhanced = [query_text] + self._generate_enhanced_queries(query_text)
+        # 并发执行：1. 扩展查询 2. 原始查询向量化
+        enhanced_task = asyncio.create_task(self._agenerate_enhanced_queries(query_text))
         
-        # 1. 并发生成所有 Query 的 Embedding
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_enhanced)) as executor:
-            vectors = list(executor.map(self.embeddings.embed_query, all_enhanced))
+        loop = asyncio.get_event_loop()
+        vector_task = loop.run_in_executor(None, self.embeddings.embed_query, query_text)
         
-        # 2. 并发执行多路检索 (减少 worker 数量以应对 Bonsai 429)
+        enhanced_queries, original_vector = await asyncio.gather(enhanced_task, vector_task)
+        all_queries = [query_text] + enhanced_queries
+        
+        # 并发生成其余向量
+        vector_tasks = [loop.run_in_executor(None, self.embeddings.embed_query, q) for q in enhanced_queries]
+        other_vectors = await asyncio.gather(*vector_tasks)
+        all_vectors = [original_vector] + other_vectors
+        
+        # 并发执行多路检索
+        search_tasks = [self._asingle_query(q, all_vectors[i], i, top_k, report_id) for i, q in enumerate(all_queries)]
+        search_results = await asyncio.gather(*search_tasks)
+        
         all_context_pieces = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(self._single_query, q, vectors[i], i, top_k, report_id) for i, q in enumerate(all_enhanced)]
-            for future in concurrent.futures.as_completed(futures):
-                all_context_pieces.extend(future.result())
+        for res in search_results:
+            all_context_pieces.extend(res)
 
         unique_pieces = list(dict.fromkeys(all_context_pieces))
         if not unique_pieces: return "未检索到相关内容。"
         
-        print(f"📊 RAG: 召回 {len(unique_pieces)} 个片段，进入精排...")
+        print(f"📊 RAG: Recalled {len(unique_pieces)} pieces, reranking...")
         sys.stdout.flush()
-        return "\n\n---\n\n".join(self._rerank_documents(query_text, unique_pieces, top_k))
+        
+        reranked = await self._arerank_documents(query_text, unique_pieces, top_k)
+        return "\n\n---\n\n".join(reranked)
 
-    def _rerank_documents(self, query: str, context_pieces: List[str], top_k: int) -> List[str]:
+    async def _arerank_documents(self, query: str, context_pieces: List[str], top_k: int) -> List[str]:
         if not context_pieces: return []
         context_str = "\n\n".join([f"ID:{i} | {c[:400]}" for i, c in enumerate(context_pieces)])
         prompt = f"请按相关性精排片段。仅返回前 {top_k} 个 ID（如 0,1）。查询：{query}\n片段：\n{context_str}"
         try:
-            res = get_completion(prompt, "Senior auditor.")
+            res = await aget_completion(prompt, "Senior auditor.")
             ids = [int(i.strip()) for i in res.replace("ID:", "").split(",") if i.strip().isdigit()]
             return [context_pieces[idx] for idx in ids if 0 <= idx < len(context_pieces)][:top_k]
         except Exception: return context_pieces[:top_k]
+
+    def query(self, query_text: str, top_k: int = 5, report_id: str = None) -> str:
+        """同步包装器，兼容现有同步调用"""
+        return asyncio.run(self.aquery(query_text, top_k, report_id))
